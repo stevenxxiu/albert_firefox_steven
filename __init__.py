@@ -30,7 +30,7 @@ md_url = 'https://github.com/stevenxxiu/albert_firefox_steven'
 md_authors = ['@stevenxxiu']
 
 ICON_NAME = 'firefox-developer-edition'
-FIREFOX_DATA_PATH = Path.home() / '.mozilla/firefox/'
+FIREFOX_DATA_PATH = Path.home() / '.config/mozilla/firefox/'
 
 
 class Bookmark(NamedTuple):
