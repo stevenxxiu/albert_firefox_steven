@@ -4,25 +4,25 @@ import re
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable, NamedTuple, TypedDict, override
 
 from albert import (
     Action,
+    GeneratorQueryHandler,
+    Icon,
     Item,
     Matcher,
     PluginInstance,
-    Query,
+    QueryContext,
     StandardItem,
-    TriggerQueryHandler,
-    makeThemeIcon,
     runDetachedProcess,
 )
 
-md_iid = '4.0'
-md_version = '1.1'
+md_iid = '5.0'
+md_version = '1.2'
 md_name = 'Firefox'
 md_description = 'Open Firefox bookmarks'
 md_license = 'MIT'
@@ -105,13 +105,13 @@ class FirefoxSettings(TypedDict):
     profileName: str
 
 
-class Plugin(PluginInstance, TriggerQueryHandler):
+class Plugin(PluginInstance, GeneratorQueryHandler):
     profile_path: Path
     bookmarks: list[Bookmark]
 
     def __init__(self) -> None:
         PluginInstance.__init__(self)
-        TriggerQueryHandler.__init__(self)
+        GeneratorQueryHandler.__init__(self)
 
         settings_path = self.configLocation() / 'settings.json'
         if settings_path.exists():
@@ -134,8 +134,8 @@ class Plugin(PluginInstance, TriggerQueryHandler):
         self.bookmarks = get_bookmarks(self.profile_path)
 
     @override
-    def handleTriggerQuery(self, query: Query) -> None:
-        matcher = Matcher(query.string)
+    def items(self, ctx: QueryContext) -> Generator[list[Item]]:
+        matcher = Matcher(ctx.query)
 
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
         for i, (name, url) in enumerate(self.bookmarks):
@@ -157,7 +157,7 @@ class Plugin(PluginInstance, TriggerQueryHandler):
                 id=str(i),
                 text=name,
                 subtext=url,
-                icon_factory=lambda: makeThemeIcon(ICON_NAME),
+                icon_factory=lambda: Icon.theme(ICON_NAME),
                 actions=[Action('open', 'Open', open_url_call)],
             )
             items_with_score.append((item, score))
@@ -167,8 +167,8 @@ class Plugin(PluginInstance, TriggerQueryHandler):
         item = StandardItem(
             id='reload',
             text='Reload bookmarks database',
-            icon_factory=lambda: makeThemeIcon(ICON_NAME),
+            icon_factory=lambda: Icon.theme(ICON_NAME),
             actions=[Action('reload', 'Reload bookmarks database', self.load_bookmarks)],
         )
         items.append(item)
-        query.add(items)  # pyright: ignore[reportUnknownMemberType]
+        yield items
