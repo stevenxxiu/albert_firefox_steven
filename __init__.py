@@ -64,20 +64,20 @@ def get_profile_path() -> Path:
 
 
 @contextmanager
-def open_places_db(profile_path: Path) -> Iterator[sqlite3.Connection]:
+def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = Path(temp_dir)
-        _ = shutil.copy(profile_path / 'places.sqlite', temp_dir)
-        wal_path = profile_path / 'places.sqlite-wal'
+        _ = shutil.copy(db_path, temp_dir)
+        wal_path = db_path.parent / f'{db_path.name}-wal'
         if wal_path.exists():
             _ = shutil.copy(wal_path, temp_dir)
 
-        with closing(sqlite3.connect(temp_dir / 'places.sqlite')) as con:
+        with closing(sqlite3.connect(temp_dir / db_path.name)) as con:
             yield con
 
 
 def get_bookmarks(profile_path: Path) -> list[Bookmark]:
-    with open_places_db(profile_path) as con:
+    with open_db(profile_path / 'places.sqlite') as con:
         cur = con.cursor()
 
         # Ignore *Firefox* bookmarks menu official bookmarks
