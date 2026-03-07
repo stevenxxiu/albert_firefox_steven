@@ -1,4 +1,5 @@
 import configparser
+import itertools
 import json
 import re
 import shutil
@@ -24,19 +25,19 @@ from albert import (
 md_iid = '5.0'
 md_version = '1.2'
 md_name = 'Firefox'
-md_description = 'Open Firefox bookmarks'
 md_license = 'MIT'
 md_url = 'https://github.com/stevenxxiu/albert_firefox_steven'
 md_authors = ['@stevenxxiu']
 
 ICON_NAME = 'firefox-developer-edition'
 FIREFOX_DATA_PATH = Path.home() / '.config/mozilla/firefox/'
+PAGE_SIZE = 10
 
 
-class Bookmark(NamedTuple):
+class Place(NamedTuple):
     url_hash: int
-    name: str
     url: str
+    title: str
 
 
 def get_profile_path() -> Path:
@@ -96,7 +97,7 @@ def get_favicons(profile_path: Path, url_hashes: list[int]) -> dict[int, bytes]:
         return {row[0]: row[1] for row in cur}  # pyright: ignore[reportAny]
 
 
-def get_bookmarks(profile_path: Path) -> list[Bookmark]:
+def query_bookmarks(profile_path: Path, query: str) -> Generator[Place, None, None]:
     with open_db(profile_path / 'places.sqlite') as con:
         cur = con.cursor()
 
@@ -109,59 +110,82 @@ def get_bookmarks(profile_path: Path) -> list[Bookmark]:
             ignored_folders = [-1]
 
         _ = cur.execute(
-            """
+            f"""
             SELECT moz_places.url_hash, moz_places.url, moz_bookmarks.title
             FROM moz_bookmarks
             INNER JOIN moz_places ON moz_bookmarks.fk=moz_places.id
             WHERE moz_bookmarks.fk IS NOT NULL
-              AND moz_bookmarks.parent NOT IN (?)
+                AND moz_bookmarks.parent NOT IN ({', '.join(['?'] * len(ignored_folders))})
+                AND (LOWER(moz_bookmarks.title) LIKE ? OR LOWER(moz_places.url) LIKE ?)
             """,
-            ignored_folders,
+            [*ignored_folders, f'%{query.lower()}%', f'%{query.lower()}%'],
         )
-        return [Bookmark(url_hash, url, title or '') for url_hash, title, url in cur]  # pyright: ignore[reportAny]
+        for url_hash, url, title in cur:  # pyright: ignore[reportAny]
+            yield Place(url_hash, url, title or '')
 
 
-class FirefoxSettings(TypedDict):
-    profileName: str
+def query_history(profile_path: Path, query: str, limit: int, offset: int) -> Generator[Place, None, None]:
+    with open_db(profile_path / 'places.sqlite') as con:
+        cur = con.cursor()
+        _ = cur.execute(
+            """
+            SELECT url_hash, url, title
+            FROM moz_places
+            WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
+            ORDER BY last_visit_date DESC
+            LIMIT ?
+            OFFSET ?
+            """,
+            [f'%{query.lower()}%', f'%{query.lower()}%', limit, offset],
+        )
+        for url_hash, url, title in cur:  # pyright: ignore[reportAny]
+            yield Place(url_hash, url, title or '')
 
 
-class Plugin(PluginInstance, GeneratorQueryHandler):
+class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplicitAbstractClass]
     profile_path: Path
+    cache_path: Path
 
-    def __init__(self) -> None:
-        PluginInstance.__init__(self)
+    def __init__(self, profile_path: Path, cache_path: Path) -> None:
         GeneratorQueryHandler.__init__(self)
+        self.profile_path = profile_path
+        self.cache_path = cache_path
 
-        settings_path = self.configLocation() / 'settings.json'
-        if settings_path.exists():
-            with settings_path.open() as sr:
-                settings: FirefoxSettings = json.load(sr)  # pyright: ignore[reportAny]
-                self.profile_path = FIREFOX_DATA_PATH / settings['profileName']
-        else:
-            self.profile_path = get_profile_path()
+    @override
+    def name(self) -> str:
+        return md_name
 
     @override
     def synopsis(self, _query: str) -> str:
         return '<query>'
 
+    def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
+        return Icon.image(self.cache_path / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
+
+
+class FirefoxBookmarkHandler(FirefoxBaseHandler):
+    @override
+    def id(self) -> str:
+        return f'{md_iid}.bookmark'
+
     @override
     def defaultTrigger(self):
-        return 'br '
+        return 'fb '
 
-    def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
-        return Icon.image(self.cacheLocation() / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
+    @override
+    def description(self) -> str:
+        return 'Open Firefox bookmarks'
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         matcher = Matcher(ctx.query)
 
-        bookmarks = get_bookmarks(self.profile_path)
-        url_hashes = {url_hash for (url_hash, _url, _name) in bookmarks}
-
-        favicons = get_favicons(self.profile_path, list(url_hashes))
-
+        places = query_bookmarks(self.profile_path, ctx.query)
+        url_hashes: set[int] = set()
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
-        for i, (url_hash, url, name) in enumerate(bookmarks):
+        favicons: dict[int, bytes] = {}
+        for url_hash, url, name in places:
+            url_hashes.add(url_hash)
             score: tuple[int, float] | None = None
             if not score:
                 match = matcher.match(name)
@@ -177,7 +201,7 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
                 continue
             open_url_call: Callable[[str], int] = lambda url=url: runDetachedProcess(['xdg-open', url])  # noqa: E731
             item = StandardItem(
-                id=str(i),
+                id=str(url_hash),
                 text=name,
                 subtext=url,
                 icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
@@ -186,10 +210,79 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
             items_with_score.append((item, score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
-        self.cacheLocation().mkdir(exist_ok=True)
-        for path in self.cacheLocation().iterdir():
+        favicons.update(get_favicons(self.profile_path, list(url_hashes)))
+        for path in self.cache_path.iterdir():
             path.unlink()
         for url_hash, icon_data in favicons.items():
-            _ = (self.cacheLocation() / str(url_hash)).write_bytes(icon_data)
+            _ = (self.cache_path / str(url_hash)).write_bytes(icon_data)
 
         yield [item for item, _score in items_with_score]
+
+
+class FirefoxHistoryHandler(FirefoxBaseHandler):
+    @override
+    def id(self) -> str:
+        return f'{md_iid}.history'
+
+    @override
+    def defaultTrigger(self):
+        return 'fh '
+
+    @override
+    def description(self) -> str:
+        return 'Open Firefox history'
+
+    @override
+    def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
+        url_hashes: set[int] = set()
+        favicons: dict[int, bytes] = {}
+        for path in self.cache_path.iterdir():
+            path.unlink()
+        for i in itertools.count(0):
+            places = query_history(self.profile_path, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
+            items: list[Item] = []
+            for url_hash, url, name in places:
+                url_hashes.add(url_hash)
+                open_url_call: Callable[[str], int] = lambda url=url: runDetachedProcess(['xdg-open', url])  # noqa: E731
+                items.append(
+                    StandardItem(
+                        id=str(url_hash),
+                        text=name,
+                        subtext=url,
+                        icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
+                        actions=[Action('open', 'Open', open_url_call)],
+                    )
+                )
+            favicon_batch = get_favicons(self.profile_path, list(url_hashes))
+            for url_hash, icon_data in favicon_batch.items():
+                _ = (self.cache_path / str(url_hash)).write_bytes(icon_data)
+            favicons.update(favicon_batch)
+            yield items
+
+
+class FirefoxSettings(TypedDict):
+    profileName: str
+
+
+class Plugin(PluginInstance):
+    bookmark_handler: FirefoxBookmarkHandler
+    history_handler: FirefoxHistoryHandler
+
+    def __init__(self) -> None:
+        PluginInstance.__init__(self)
+        settings_path = self.configLocation() / 'settings.json'
+        if settings_path.exists():
+            with settings_path.open() as sr:
+                settings: FirefoxSettings = json.load(sr)  # pyright: ignore[reportAny]
+                profile_path = FIREFOX_DATA_PATH / settings['profileName']
+        else:
+            profile_path = get_profile_path()
+
+        cache_path = self.cacheLocation()
+        cache_path.mkdir(exist_ok=True)
+        self.bookmark_handler = FirefoxBookmarkHandler(profile_path, cache_path)
+        self.history_handler = FirefoxHistoryHandler(profile_path, cache_path)
+
+    @override
+    def extensions(self) -> list[GeneratorQueryHandler]:
+        return [self.bookmark_handler, self.history_handler]
