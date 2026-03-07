@@ -107,7 +107,6 @@ class FirefoxSettings(TypedDict):
 
 class Plugin(PluginInstance, GeneratorQueryHandler):
     profile_path: Path
-    bookmarks: list[Bookmark]
 
     def __init__(self) -> None:
         PluginInstance.__init__(self)
@@ -120,7 +119,6 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
                 self.profile_path = FIREFOX_DATA_PATH / settings['profileName']
         else:
             self.profile_path = get_profile_path()
-        self.load_bookmarks()
 
     @override
     def synopsis(self, _query: str) -> str:
@@ -130,15 +128,13 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
     def defaultTrigger(self):
         return 'br '
 
-    def load_bookmarks(self) -> None:
-        self.bookmarks = get_bookmarks(self.profile_path)
-
     @override
-    def items(self, ctx: QueryContext) -> Generator[list[Item]]:
+    def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         matcher = Matcher(ctx.query)
 
+        bookmarks = get_bookmarks(self.profile_path)
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
-        for i, (name, url) in enumerate(self.bookmarks):
+        for i, (name, url) in enumerate(bookmarks):
             score: tuple[int, float] | None = None
             if not score:
                 match = matcher.match(name)
@@ -162,13 +158,4 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
             )
             items_with_score.append((item, score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
-        items: list[Item] = [item for item, _score in items_with_score]
-
-        item = StandardItem(
-            id='reload',
-            text='Reload bookmarks database',
-            icon_factory=lambda: Icon.theme(ICON_NAME),
-            actions=[Action('reload', 'Reload bookmarks database', self.load_bookmarks)],
-        )
-        items.append(item)
-        yield items
+        yield [item for item, _score in items_with_score]
