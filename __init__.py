@@ -34,6 +34,7 @@ FIREFOX_DATA_PATH = Path.home() / '.config/mozilla/firefox/'
 
 
 class Bookmark(NamedTuple):
+    url_hash: int
     name: str
     url: str
 
@@ -76,6 +77,25 @@ def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
             yield con
 
 
+def get_favicons(profile_path: Path, url_hashes: list[int]) -> dict[int, bytes]:
+    """
+    :param profile_path: Profile path
+    :return: URL hash to icon data
+    """
+    with open_db(profile_path / 'favicons.sqlite') as conn:
+        cur = conn.cursor()
+        _ = cur.execute(
+            f"""
+            SELECT moz_pages_w_icons.page_url_hash, moz_icons.data FROM moz_icons
+            INNER JOIN moz_icons_to_pages ON moz_icons.id = moz_icons_to_pages.icon_id
+            INNER JOIN moz_pages_w_icons ON moz_icons_to_pages.page_id = moz_pages_w_icons.id
+            WHERE moz_pages_w_icons.page_url_hash IN ({', '.join(['?'] * len(url_hashes))})
+            """,
+            url_hashes,
+        )
+        return {row[0]: row[1] for row in cur}  # pyright: ignore[reportAny]
+
+
 def get_bookmarks(profile_path: Path) -> list[Bookmark]:
     with open_db(profile_path / 'places.sqlite') as con:
         cur = con.cursor()
@@ -90,7 +110,7 @@ def get_bookmarks(profile_path: Path) -> list[Bookmark]:
 
         _ = cur.execute(
             """
-            SELECT moz_bookmarks.title, moz_places.url
+            SELECT moz_places.url_hash, moz_places.url, moz_bookmarks.title
             FROM moz_bookmarks
             INNER JOIN moz_places ON moz_bookmarks.fk=moz_places.id
             WHERE moz_bookmarks.fk IS NOT NULL
@@ -98,7 +118,7 @@ def get_bookmarks(profile_path: Path) -> list[Bookmark]:
             """,
             ignored_folders,
         )
-        return [Bookmark(title or '', url) for title, url in cur]  # pyright: ignore[reportAny]
+        return [Bookmark(url_hash, url, title or '') for url_hash, title, url in cur]  # pyright: ignore[reportAny]
 
 
 class FirefoxSettings(TypedDict):
@@ -128,13 +148,20 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
     def defaultTrigger(self):
         return 'br '
 
+    def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
+        return Icon.image(self.cacheLocation() / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
+
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         matcher = Matcher(ctx.query)
 
         bookmarks = get_bookmarks(self.profile_path)
+        url_hashes = {url_hash for (url_hash, _url, _name) in bookmarks}
+
+        favicons = get_favicons(self.profile_path, list(url_hashes))
+
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
-        for i, (name, url) in enumerate(bookmarks):
+        for i, (url_hash, url, name) in enumerate(bookmarks):
             score: tuple[int, float] | None = None
             if not score:
                 match = matcher.match(name)
@@ -153,9 +180,16 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
                 id=str(i),
                 text=name,
                 subtext=url,
-                icon_factory=lambda: Icon.theme(ICON_NAME),
+                icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
                 actions=[Action('open', 'Open', open_url_call)],
             )
             items_with_score.append((item, score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
+
+        self.cacheLocation().mkdir(exist_ok=True)
+        for path in self.cacheLocation().iterdir():
+            path.unlink()
+        for url_hash, icon_data in favicons.items():
+            _ = (self.cacheLocation() / str(url_hash)).write_bytes(icon_data)
+
         yield [item for item, _score in items_with_score]
