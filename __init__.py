@@ -95,8 +95,8 @@ def open_db(db_path: Path, temp_db_dir: Path) -> Iterator[sqlite3.Connection]:
         _ = shutil.copy(wal_path, temp_db_dir)
 
     try:
-        with closing(sqlite3.connect(temp_db_path)) as con:
-            yield con
+        with closing(sqlite3.connect(temp_db_path)) as conn:
+            yield conn
     finally:
         threading.Timer(KEEP_DB_SECS, rm_temp_db, args=(temp_db_path,)).start()
 
@@ -121,8 +121,8 @@ def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -
 
 
 def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Generator[Place, None, None]:
-    with open_db(profile_path / 'places.sqlite', temp_db_dir) as con:
-        cur = con.cursor()
+    with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
+        cur = conn.cursor()
 
         # Ignore *Firefox* bookmarks menu official bookmarks
         _ = cur.execute('SELECT id FROM moz_bookmarks WHERE title LIKE "Mozilla Firefox" AND fk IS NULL')
@@ -150,8 +150,8 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
 def query_history(
     profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
 ) -> Generator[Place, None, None]:
-    with open_db(profile_path / 'places.sqlite', temp_db_dir) as con:
-        cur = con.cursor()
+    with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
+        cur = conn.cursor()
         _ = cur.execute(
             """
             SELECT url, title, last_visit_date, url_hash
