@@ -8,6 +8,7 @@ import tempfile
 import threading
 from collections.abc import Generator, Iterator
 from contextlib import closing, contextmanager, suppress
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, NamedTuple, TypedDict, override
 
@@ -40,9 +41,10 @@ PAGE_SIZE = 10
 
 
 class Place(NamedTuple):
-    url_hash: int
     url: str
     title: str
+    last_visit_us: int | None
+    url_hash: int
 
 
 def get_profile_path() -> Path:
@@ -132,7 +134,7 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
 
         _ = cur.execute(
             f"""
-            SELECT moz_places.url_hash, moz_places.url, moz_bookmarks.title
+            SELECT moz_places.url, moz_bookmarks.title, moz_places.url_hash
             FROM moz_bookmarks
             INNER JOIN moz_places ON moz_bookmarks.fk=moz_places.id
             WHERE moz_bookmarks.fk IS NOT NULL
@@ -141,8 +143,8 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
             """,
             [*ignored_folders, f'%{query.lower()}%', f'%{query.lower()}%'],
         )
-        for url_hash, url, title in cur:  # pyright: ignore[reportAny]
-            yield Place(url_hash, url, title or '')
+        for url, title, url_hash in cur:  # pyright: ignore[reportAny]
+            yield Place(url, title or '', None, url_hash)
 
 
 def query_history(
@@ -152,7 +154,7 @@ def query_history(
         cur = con.cursor()
         _ = cur.execute(
             """
-            SELECT url_hash, url, title
+            SELECT url, title, last_visit_date, url_hash
             FROM moz_places
             WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
             ORDER BY last_visit_date DESC
@@ -161,8 +163,8 @@ def query_history(
             """,
             [f'%{query.lower()}%', f'%{query.lower()}%', limit, offset],
         )
-        for url_hash, url, title in cur:  # pyright: ignore[reportAny]
-            yield Place(url_hash, url, title or '')
+        for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
+            yield Place(url, title or '', last_visit_date, url_hash)
 
 
 class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplicitAbstractClass]
@@ -187,13 +189,19 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
     def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
         return Icon.image(self.favicon_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
 
-    def create_item(self, url_hash: int, title: str, url: str, favicons: dict[int, bytes]) -> StandardItem:
+    def create_item(
+        self, url: str, title: str, last_visit_us: int | None, url_hash: int, favicons: dict[int, bytes]
+    ) -> StandardItem:
         open_call = lambda url_=url: openUrl(url_)  # noqa: E731
         copy_call = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
+        subtext = url
+        if last_visit_us is not None:
+            last_visit_dt = datetime.fromtimestamp(last_visit_us // 1000000)
+            subtext = f'<font color="dimgray">{last_visit_dt.strftime("%Y-%m-%d %H:%M")}</font> {subtext}'
         return StandardItem(
             id=str(url_hash),
             text=title,
-            subtext=url,
+            subtext=subtext,
             icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
             actions=[
                 Action('open', 'Open', open_call),
@@ -223,7 +231,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
         url_hashes: set[int] = set()
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
         favicons: dict[int, bytes] = {}
-        for url_hash, url, name in places:
+        for url, name, _last_visit_date, url_hash in places:
             url_hashes.add(url_hash)
             score: tuple[int, float] | None = None
             if not score:
@@ -238,7 +246,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
                     score = (1, match.score)
             if not score:
                 continue
-            items_with_score.append((self.create_item(url_hash, name, url, favicons), score))
+            items_with_score.append((self.create_item(url, name, None, url_hash, favicons), score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
         favicons.update(get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes)))
@@ -272,9 +280,9 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
         for i in itertools.count(0):
             places = query_history(self.profile_path, self.temp_db_dir, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
             items: list[Item] = []
-            for url_hash, url, name in places:
+            for url, name, last_visit_us, url_hash in places:
                 url_hashes.add(url_hash)
-                items.append(self.create_item(url_hash, name, url, favicons))
+                items.append(self.create_item(url, name, last_visit_us, url_hash, favicons))
             favicon_batch = get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes))
             for url_hash, icon_data in favicon_batch.items():
                 _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
