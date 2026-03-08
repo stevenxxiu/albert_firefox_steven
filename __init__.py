@@ -24,7 +24,7 @@ from albert import (
 
 md_iid = '5.0'
 md_version = '1.2'
-md_name = 'Firefox'
+md_name = 'Firefox Steven'
 md_license = 'MIT'
 md_url = 'https://github.com/stevenxxiu/albert_firefox_steven'
 md_authors = ['@stevenxxiu']
@@ -264,7 +264,7 @@ class FirefoxSettings(TypedDict):
     profileName: str
 
 
-TMP_PREFIX = 'albert_firefox_'
+TMP_PREFIX = 'albert_firefox_steven_'
 
 
 def clean_tmp() -> None:
