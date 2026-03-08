@@ -5,8 +5,9 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import threading
 from collections.abc import Generator, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import Callable, NamedTuple, TypedDict, override
 
@@ -65,25 +66,41 @@ def get_profile_path() -> Path:
     raise ValueError
 
 
+KEEP_DB_SECS = 10
+cleanup_timer: threading.Timer | None = None
+
+
+def rm_temp_db(temp_path: Path) -> None:
+    for name in temp_path.name, f'{temp_path.name}-wal', f'{temp_path.name}-shm':
+        with suppress(OSError):
+            (temp_path.parent / name).unlink(missing_ok=True)
+
+
 @contextmanager
-def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        _ = shutil.copy(db_path, temp_dir)
-        wal_path = db_path.parent / f'{db_path.name}-wal'
-        if wal_path.exists():
-            _ = shutil.copy(wal_path, temp_dir)
+def open_db(db_path: Path, temp_db_dir: Path) -> Iterator[sqlite3.Connection]:
+    global cleanup_timer
+    if cleanup_timer:
+        cleanup_timer.cancel()
+    temp_db_path = temp_db_dir / db_path.name
+    if not (temp_db_path.exists() and db_path.stat().st_mtime_ns != temp_db_path.stat().st_mtime_ns):
+        _ = shutil.copy(db_path, temp_db_dir)
+    wal_path = db_path.parent / f'{db_path.name}-wal'
+    if wal_path.exists():
+        _ = shutil.copy(wal_path, temp_db_dir)
 
-        with closing(sqlite3.connect(temp_dir / db_path.name)) as con:
+    try:
+        with closing(sqlite3.connect(temp_db_path)) as con:
             yield con
+    finally:
+        threading.Timer(KEEP_DB_SECS, rm_temp_db, args=(temp_db_path,)).start()
 
 
-def get_favicons(profile_path: Path, url_hashes: list[int]) -> dict[int, bytes]:
+def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -> dict[int, bytes]:
     """
     :param profile_path: Profile path
     :return: URL hash to icon data
     """
-    with open_db(profile_path / 'favicons.sqlite') as conn:
+    with open_db(profile_path / 'favicons.sqlite', temp_db_dir) as conn:
         cur = conn.cursor()
         _ = cur.execute(
             f"""
@@ -97,8 +114,8 @@ def get_favicons(profile_path: Path, url_hashes: list[int]) -> dict[int, bytes]:
         return {row[0]: row[1] for row in cur}  # pyright: ignore[reportAny]
 
 
-def query_bookmarks(profile_path: Path, query: str) -> Generator[Place, None, None]:
-    with open_db(profile_path / 'places.sqlite') as con:
+def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Generator[Place, None, None]:
+    with open_db(profile_path / 'places.sqlite', temp_db_dir) as con:
         cur = con.cursor()
 
         # Ignore *Firefox* bookmarks menu official bookmarks
@@ -124,8 +141,10 @@ def query_bookmarks(profile_path: Path, query: str) -> Generator[Place, None, No
             yield Place(url_hash, url, title or '')
 
 
-def query_history(profile_path: Path, query: str, limit: int, offset: int) -> Generator[Place, None, None]:
-    with open_db(profile_path / 'places.sqlite') as con:
+def query_history(
+    profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
+) -> Generator[Place, None, None]:
+    with open_db(profile_path / 'places.sqlite', temp_db_dir) as con:
         cur = con.cursor()
         _ = cur.execute(
             """
@@ -144,12 +163,14 @@ def query_history(profile_path: Path, query: str, limit: int, offset: int) -> Ge
 
 class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplicitAbstractClass]
     profile_path: Path
-    temp_dir: Path
+    temp_db_dir: Path
+    favicon_dir: Path
 
-    def __init__(self, profile_path: Path, temp_dir: Path) -> None:
+    def __init__(self, profile_path: Path, temp_db_dir: Path, favicon_dir: Path) -> None:
         GeneratorQueryHandler.__init__(self)
         self.profile_path = profile_path
-        self.temp_dir = temp_dir
+        self.temp_db_dir = temp_db_dir
+        self.favicon_dir = favicon_dir
 
     @override
     def name(self) -> str:
@@ -160,7 +181,7 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
         return '<query>'
 
     def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
-        return Icon.image(self.temp_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
+        return Icon.image(self.favicon_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
 
 
 class FirefoxBookmarkHandler(FirefoxBaseHandler):
@@ -180,7 +201,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         matcher = Matcher(ctx.query)
 
-        places = query_bookmarks(self.profile_path, ctx.query)
+        places = query_bookmarks(self.profile_path, self.temp_db_dir, ctx.query)
         url_hashes: set[int] = set()
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
         favicons: dict[int, bytes] = {}
@@ -210,11 +231,11 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
             items_with_score.append((item, score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
-        favicons.update(get_favicons(self.profile_path, list(url_hashes)))
-        for path in self.temp_dir.iterdir():
+        favicons.update(get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes)))
+        for path in self.favicon_dir.iterdir():
             path.unlink()
         for url_hash, icon_data in favicons.items():
-            _ = (self.temp_dir / str(url_hash)).write_bytes(icon_data)
+            _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
 
         yield [item for item, _score in items_with_score]
 
@@ -236,10 +257,10 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         url_hashes: set[int] = set()
         favicons: dict[int, bytes] = {}
-        for path in self.temp_dir.iterdir():
+        for path in self.favicon_dir.iterdir():
             path.unlink()
         for i in itertools.count(0):
-            places = query_history(self.profile_path, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
+            places = query_history(self.profile_path, self.temp_db_dir, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
             items: list[Item] = []
             for url_hash, url, name in places:
                 url_hashes.add(url_hash)
@@ -253,9 +274,9 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
                         actions=[Action('open', 'Open', open_url_call)],
                     )
                 )
-            favicon_batch = get_favicons(self.profile_path, list(url_hashes))
+            favicon_batch = get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes))
             for url_hash, icon_data in favicon_batch.items():
-                _ = (self.temp_dir / str(url_hash)).write_bytes(icon_data)
+                _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
             favicons.update(favicon_batch)
             yield items
 
@@ -264,23 +285,23 @@ class FirefoxSettings(TypedDict):
     profileName: str
 
 
-TMP_PREFIX = 'albert_firefox_steven_'
-
-
-def clean_tmp() -> None:
+def clean_tmp(prefix: str) -> None:
     """
     Delete any temporary directories, that could've been created from a previous crash.
     """
-    for temp_dir in Path(tempfile.gettempdir()).glob(f'{TMP_PREFIX}*'):
+    for temp_dir in Path(tempfile.gettempdir()).glob(f'{prefix}*'):
         for child in temp_dir.iterdir():
             child.unlink()
         temp_dir.rmdir()
 
 
 class Plugin(PluginInstance):
+    TEMP_DB_PREFIX: str = 'albert_firefox_steven_db_'
+    FAVICON_PREFIX: str = 'albert_firefox_steven_favicon_'
     bookmark_handler: FirefoxBookmarkHandler
     history_handler: FirefoxHistoryHandler
-    temp_dir: Path
+    favicon_dir: Path
+    temp_db_dir: Path
 
     def __init__(self) -> None:
         PluginInstance.__init__(self)
@@ -292,10 +313,15 @@ class Plugin(PluginInstance):
         else:
             profile_path = get_profile_path()
 
-        clean_tmp()
-        self.temp_dir = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))
-        self.bookmark_handler = FirefoxBookmarkHandler(profile_path, self.temp_dir)
-        self.history_handler = FirefoxHistoryHandler(profile_path, self.temp_dir)
+        clean_tmp(self.FAVICON_PREFIX)
+        self.temp_db_dir = Path(tempfile.mkdtemp(prefix=self.TEMP_DB_PREFIX))
+        self.favicon_dir = Path(tempfile.mkdtemp(prefix=self.FAVICON_PREFIX))
+        self.bookmark_handler = FirefoxBookmarkHandler(profile_path, self.temp_db_dir, self.favicon_dir)
+        self.history_handler = FirefoxHistoryHandler(profile_path, self.temp_db_dir, self.favicon_dir)
+
+    def __del__(self) -> None:
+        shutil.rmtree(self.favicon_dir)
+        shutil.rmtree(self.temp_db_dir)
 
     @override
     def extensions(self) -> list[GeneratorQueryHandler]:
