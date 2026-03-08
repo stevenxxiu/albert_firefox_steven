@@ -175,6 +175,19 @@ def query_history(
             yield Place(url, title or '', last_visit_date, url_hash)
 
 
+def highlight_query(text: str, pattern: re.Pattern[str] | None) -> str:
+    if not pattern:
+        return text
+    return pattern.sub(r'<u>\1</u>', text)
+
+
+def create_highlight_pattern(query: str) -> re.Pattern[str] | None:
+    query = query.strip()
+    if not query:
+        return None
+    return re.compile(r'(' + '|'.join(map(re.escape, query.split())) + r')', flags=re.IGNORECASE)
+
+
 class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplicitAbstractClass]
     profile_path: Path
     temp_db_dir: Path
@@ -198,17 +211,23 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
         return Icon.image(self.favicon_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
 
     def create_item(
-        self, url: str, title: str, last_visit_us: int | None, url_hash: int, favicons: dict[int, bytes]
+        self,
+        url: str,
+        title: str,
+        last_visit_us: int | None,
+        url_hash: int,
+        query_pattern: re.Pattern[str] | None,
+        favicons: dict[int, bytes],
     ) -> StandardItem:
         open_call = lambda url_=url: openUrl(url_)  # noqa: E731
         copy_call = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
-        subtext = url
+        subtext = highlight_query(url, query_pattern)
         if last_visit_us is not None:
             last_visit_dt = datetime.fromtimestamp(last_visit_us // 1000000)
             subtext = f'<font color="dimgray">{last_visit_dt.strftime("%Y-%m-%d %H:%M")}</font> {subtext}'
         return StandardItem(
             id=str(url_hash),
-            text=title,
+            text=highlight_query(title, query_pattern),
             subtext=subtext,
             icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
             actions=[
@@ -234,6 +253,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         matcher = Matcher(ctx.query)
+        query_pattern = create_highlight_pattern(ctx.query)
 
         places = query_bookmarks(self.profile_path, self.temp_db_dir, ctx.query)
         url_hashes: set[int] = set()
@@ -254,7 +274,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
                     score = (1, match.score)
             if not score:
                 continue
-            items_with_score.append((self.create_item(url, name, None, url_hash, favicons), score))
+            items_with_score.append((self.create_item(url, name, None, url_hash, query_pattern, favicons), score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
         favicons.update(get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes)))
@@ -281,6 +301,7 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
+        query_pattern = create_highlight_pattern(ctx.query)
         url_hashes: set[int] = set()
         favicons: dict[int, bytes] = {}
         for path in self.favicon_dir.iterdir():
@@ -290,7 +311,7 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
             items: list[Item] = []
             for url, name, last_visit_us, url_hash in places:
                 url_hashes.add(url_hash)
-                items.append(self.create_item(url, name, last_visit_us, url_hash, favicons))
+                items.append(self.create_item(url, name, last_visit_us, url_hash, query_pattern, favicons))
             favicon_batch = get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes))
             for url_hash, icon_data in favicon_batch.items():
                 _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
