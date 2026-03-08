@@ -11,6 +11,7 @@ from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import Callable, NamedTuple, TypedDict, override
 
+from albert import openUrl  # pyright: ignore[reportUnknownVariableType]
 from albert import setClipboardText  # pyright: ignore[reportUnknownVariableType]
 from albert import (
     Action,
@@ -21,10 +22,10 @@ from albert import (
     PluginInstance,
     QueryContext,
     StandardItem,
-    runDetachedProcess,
 )
 
 setClipboardText: Callable[[str], None]
+openUrl: Callable[[str], None]
 
 md_iid = '5.0'
 md_version = '1.2'
@@ -187,8 +188,8 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
         return Icon.image(self.favicon_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
 
     def create_item(self, url_hash: int, title: str, url: str, favicons: dict[int, bytes]) -> StandardItem:
-        open_call: Callable[[str], int] = lambda url_=url: runDetachedProcess(['xdg-open', url_])  # noqa: E731
-        copy_call: Callable[[str, str], None] = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
+        open_call = lambda url_=url: openUrl(url_)  # noqa: E731
+        copy_call = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
         return StandardItem(
             id=str(url_hash),
             text=title,
