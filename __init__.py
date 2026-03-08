@@ -11,6 +11,7 @@ from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import Callable, NamedTuple, TypedDict, override
 
+from albert import setClipboardText  # pyright: ignore[reportUnknownVariableType]
 from albert import (
     Action,
     GeneratorQueryHandler,
@@ -22,6 +23,8 @@ from albert import (
     StandardItem,
     runDetachedProcess,
 )
+
+setClipboardText: Callable[[str], None]
 
 md_iid = '5.0'
 md_version = '1.2'
@@ -183,6 +186,20 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
     def get_icon(self, url_hash: int, favicons: dict[int, bytes]) -> Icon:
         return Icon.image(self.favicon_dir / str(url_hash)) if url_hash in favicons else Icon.theme(ICON_NAME)
 
+    def create_item(self, url_hash: int, title: str, url: str, favicons: dict[int, bytes]) -> StandardItem:
+        open_call: Callable[[str], int] = lambda url_=url: runDetachedProcess(['xdg-open', url_])  # noqa: E731
+        copy_call: Callable[[str, str], None] = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
+        return StandardItem(
+            id=str(url_hash),
+            text=title,
+            subtext=url,
+            icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
+            actions=[
+                Action('open', 'Open', open_call),
+                Action('copy', 'Copy to clipboard', copy_call),
+            ],
+        )
+
 
 class FirefoxBookmarkHandler(FirefoxBaseHandler):
     @override
@@ -220,15 +237,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
                     score = (1, match.score)
             if not score:
                 continue
-            open_url_call: Callable[[str], int] = lambda url=url: runDetachedProcess(['xdg-open', url])  # noqa: E731
-            item = StandardItem(
-                id=str(url_hash),
-                text=name,
-                subtext=url,
-                icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
-                actions=[Action('open', 'Open', open_url_call)],
-            )
-            items_with_score.append((item, score))
+            items_with_score.append((self.create_item(url_hash, name, url, favicons), score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
         favicons.update(get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes)))
@@ -264,16 +273,7 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
             items: list[Item] = []
             for url_hash, url, name in places:
                 url_hashes.add(url_hash)
-                open_url_call: Callable[[str], int] = lambda url=url: runDetachedProcess(['xdg-open', url])  # noqa: E731
-                items.append(
-                    StandardItem(
-                        id=str(url_hash),
-                        text=name,
-                        subtext=url,
-                        icon_factory=lambda url_hash_=url_hash: self.get_icon(url_hash_, favicons),
-                        actions=[Action('open', 'Open', open_url_call)],
-                    )
-                )
+                items.append(self.create_item(url_hash, name, url, favicons))
             favicon_batch = get_favicons(self.profile_path, self.temp_db_dir, list(url_hashes))
             for url_hash, icon_data in favicon_batch.items():
                 _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
