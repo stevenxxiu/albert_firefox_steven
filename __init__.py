@@ -120,6 +120,12 @@ def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -
         return {row[0]: row[1] for row in cur}  # pyright: ignore[reportAny]
 
 
+def query_to_pattern(query: str) -> str:
+    query = query.lower().replace('%', '%%')
+    query = '%'.join(query.split())
+    return f'%{query}%'
+
+
 def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Generator[Place, None, None]:
     with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
         cur = conn.cursor()
@@ -132,6 +138,7 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
         if not ignored_folders:
             ignored_folders = [-1]
 
+        pattern = query_to_pattern(query)
         _ = cur.execute(
             f"""
             SELECT moz_places.url, moz_bookmarks.title, moz_places.url_hash
@@ -141,7 +148,7 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
                 AND moz_bookmarks.parent NOT IN ({', '.join(['?'] * len(ignored_folders))})
                 AND (LOWER(moz_bookmarks.title) LIKE ? OR LOWER(moz_places.url) LIKE ?)
             """,
-            [*ignored_folders, f'%{query.lower()}%', f'%{query.lower()}%'],
+            [*ignored_folders, pattern, pattern],
         )
         for url, title, url_hash in cur:  # pyright: ignore[reportAny]
             yield Place(url, title or '', None, url_hash)
@@ -152,6 +159,7 @@ def query_history(
 ) -> Generator[Place, None, None]:
     with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
         cur = conn.cursor()
+        pattern = query_to_pattern(query)
         _ = cur.execute(
             """
             SELECT url, title, last_visit_date, url_hash
@@ -161,7 +169,7 @@ def query_history(
             LIMIT ?
             OFFSET ?
             """,
-            [f'%{query.lower()}%', f'%{query.lower()}%', limit, offset],
+            [pattern, pattern, limit, offset],
         )
         for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
             yield Place(url, title or '', last_visit_date, url_hash)
