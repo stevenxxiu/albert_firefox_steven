@@ -202,7 +202,7 @@ class FirefoxBaseHandler(GeneratorQueryHandler):  # pyright: ignore[reportImplic
         copy_call = lambda title_=title, url_=url: setClipboardText(f'[{title_}]({url_})')  # noqa: E731
         subtext = highlight_query(url, query_pattern)
         if last_visit_us is not None:
-            last_visit_dt = datetime.fromtimestamp(last_visit_us // 1000000)
+            last_visit_dt = datetime.fromtimestamp(last_visit_us // 1_000_000)
             subtext = f'<font color="dimgray">{last_visit_dt.strftime("%Y-%m-%d %H:%M")}</font> {subtext}'
         return StandardItem(
             id=str(url_hash),
@@ -265,22 +265,47 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
         yield [item for item, _score in items_with_score]
 
 
+class HistoryQuery(NamedTuple):
+    max_us: int | None
+    query_str: str
+
+
 class FirefoxHistoryBaseHandler(FirefoxBaseHandler):  # pyright: ignore[reportImplicitAbstractClass]
     @staticmethod
+    def parse_query(query: str) -> HistoryQuery:
+        matches = re.match(
+            r'(?:(?P<year>\d{1,4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?)?(?P<query_str>(\s+.*|))', query
+        )
+        assert matches is not None
+        matches_dict = matches.groupdict()
+        max_us = None
+        if matches_dict['year'] is not None:
+            year, month, day = int(matches_dict['year']), 12, 31
+            if matches_dict['month'] is not None:
+                month = int(matches_dict['month'])
+                if 'day' in matches_dict:
+                    day = int(matches_dict['day'])
+            max_us = int(datetime(year, month, day).timestamp()) * 1_000_000
+            if max_us < 0:
+                max_us = None
+        return HistoryQuery(max_us, matches_dict['query_str'].strip())
+
+    @staticmethod
     def query_history(
-        _profile_path: Path, _temp_db_dir: Path, _query: str, _limit: int, _offset: int
+        _profile_path: Path, _temp_db_dir: Path, _query: HistoryQuery, _limit: int, _offset: int
     ) -> Generator[Place, None, None]:
         raise NotImplementedError
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
-        query_pattern = create_highlight_pattern(ctx.query)
+        query = self.parse_query(ctx.query)
+        query_pattern = create_highlight_pattern(query.query_str)
         url_hashes: set[int] = set()
         favicons: dict[int, bytes] = {}
         for path in self.favicon_dir.iterdir():
             path.unlink()
         for i in itertools.count(0):
-            places = self.query_history(self.profile_path, self.temp_db_dir, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
+            places = self.query_history(self.profile_path, self.temp_db_dir, query, PAGE_SIZE, i * PAGE_SIZE)
             items: list[Item] = []
             for url, name, last_visit_us, url_hash in places:
                 url_hashes.add(url_hash)
@@ -308,16 +333,17 @@ class FirefoxHistoryUniqueHandler(FirefoxHistoryBaseHandler):
     @override
     @staticmethod
     def query_history(
-        profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
+        profile_path: Path, temp_db_dir: Path, query: HistoryQuery, limit: int, offset: int
     ) -> Generator[Place, None, None]:
         with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
             cur = conn.cursor()
-            pattern = query_to_pattern(query)
+            pattern = query_to_pattern(query.query_str)
             _ = cur.execute(
-                """
+                f"""
                 SELECT url, title, last_visit_date, url_hash
                 FROM moz_places
                 WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
+                {f' AND last_visit_date <= {query.max_us}' if query.max_us is not None else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
@@ -342,19 +368,24 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
         return 'Open all Firefox history'
 
     @override
+    def synopsis(self, _query: str) -> str:
+        return '[%Y[-%m[-%d]] <query>'
+
+    @override
     @staticmethod
     def query_history(
-        profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
+        profile_path: Path, temp_db_dir: Path, query: HistoryQuery, limit: int, offset: int
     ) -> Generator[Place, None, None]:
         with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
             cur = conn.cursor()
-            pattern = query_to_pattern(query)
+            pattern = query_to_pattern(query.query_str)
             _ = cur.execute(
-                """
+                f"""
                 SELECT moz_places.url, moz_places.title, moz_historyvisits.visit_date, moz_places.url_hash
                 FROM moz_historyvisits
                 INNER JOIN moz_places ON moz_historyvisits.place_id=moz_places.id
                 WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
+                {f' AND last_visit_date <= {query.max_us}' if query.max_us is not None else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
