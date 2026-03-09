@@ -43,7 +43,7 @@ PAGE_SIZE = 10
 class Place(NamedTuple):
     url: str
     title: str
-    last_visit_us: int | None
+    visit_us: int | None
     url_hash: int
 
 
@@ -152,27 +152,6 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
         )
         for url, title, url_hash in cur:  # pyright: ignore[reportAny]
             yield Place(url, title or '', None, url_hash)
-
-
-def query_history(
-    profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
-) -> Generator[Place, None, None]:
-    with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
-        cur = conn.cursor()
-        pattern = query_to_pattern(query)
-        _ = cur.execute(
-            """
-            SELECT url, title, last_visit_date, url_hash
-            FROM moz_places
-            WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
-            ORDER BY last_visit_date DESC
-            LIMIT ?
-            OFFSET ?
-            """,
-            [pattern, pattern, limit, offset],
-        )
-        for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
-            yield Place(url, title or '', last_visit_date, url_hash)
 
 
 def highlight_query(text: str, pattern: re.Pattern[str] | None) -> str:
@@ -286,18 +265,12 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
         yield [item for item, _score in items_with_score]
 
 
-class FirefoxHistoryHandler(FirefoxBaseHandler):
-    @override
-    def id(self) -> str:
-        return f'{md_iid}.history'
-
-    @override
-    def defaultTrigger(self):
-        return 'fh '
-
-    @override
-    def description(self) -> str:
-        return 'Open Firefox history'
+class FirefoxHistoryBaseHandler(FirefoxBaseHandler):  # pyright: ignore[reportImplicitAbstractClass]
+    @staticmethod
+    def query_history(
+        _profile_path: Path, _temp_db_dir: Path, _query: str, _limit: int, _offset: int
+    ) -> Generator[Place, None, None]:
+        raise NotImplementedError
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
@@ -307,7 +280,7 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
         for path in self.favicon_dir.iterdir():
             path.unlink()
         for i in itertools.count(0):
-            places = query_history(self.profile_path, self.temp_db_dir, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
+            places = self.query_history(self.profile_path, self.temp_db_dir, ctx.query, PAGE_SIZE, i * PAGE_SIZE)
             items: list[Item] = []
             for url, name, last_visit_us, url_hash in places:
                 url_hashes.add(url_hash)
@@ -317,6 +290,79 @@ class FirefoxHistoryHandler(FirefoxBaseHandler):
                 _ = (self.favicon_dir / str(url_hash)).write_bytes(icon_data)
             favicons.update(favicon_batch)
             yield items
+
+
+class FirefoxHistoryUniqueHandler(FirefoxHistoryBaseHandler):
+    @override
+    def id(self) -> str:
+        return f'{md_iid}.history.unique'
+
+    @override
+    def defaultTrigger(self):
+        return 'fh '
+
+    @override
+    def description(self) -> str:
+        return 'Open unique Firefox history'
+
+    @override
+    @staticmethod
+    def query_history(
+        profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
+    ) -> Generator[Place, None, None]:
+        with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
+            cur = conn.cursor()
+            pattern = query_to_pattern(query)
+            _ = cur.execute(
+                """
+                SELECT url, title, last_visit_date, url_hash
+                FROM moz_places
+                WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
+                ORDER BY last_visit_date DESC
+                LIMIT ?
+                OFFSET ?
+                """,
+                [pattern, pattern, limit, offset],
+            )
+            for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
+                yield Place(url, title or '', last_visit_date, url_hash)
+
+
+class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
+    @override
+    def id(self) -> str:
+        return f'{md_iid}.history_all'
+
+    @override
+    def defaultTrigger(self):
+        return 'fH '
+
+    @override
+    def description(self) -> str:
+        return 'Open all Firefox history'
+
+    @override
+    @staticmethod
+    def query_history(
+        profile_path: Path, temp_db_dir: Path, query: str, limit: int, offset: int
+    ) -> Generator[Place, None, None]:
+        with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
+            cur = conn.cursor()
+            pattern = query_to_pattern(query)
+            _ = cur.execute(
+                """
+                SELECT moz_places.url, moz_places.title, moz_historyvisits.visit_date, moz_places.url_hash
+                FROM moz_historyvisits
+                INNER JOIN moz_places ON moz_historyvisits.place_id=moz_places.id
+                WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
+                ORDER BY last_visit_date DESC
+                LIMIT ?
+                OFFSET ?
+                """,
+                [pattern, pattern, limit, offset],
+            )
+            for url, title, visit_date, url_hash in cur:  # pyright: ignore[reportAny]
+                yield Place(url, title or '', visit_date, url_hash)
 
 
 class FirefoxSettings(TypedDict):
@@ -337,7 +383,8 @@ class Plugin(PluginInstance):
     TEMP_DB_PREFIX: str = 'albert_firefox_steven_db_'
     FAVICON_PREFIX: str = 'albert_firefox_steven_favicon_'
     bookmark_handler: FirefoxBookmarkHandler
-    history_handler: FirefoxHistoryHandler
+    history_unique_handler: FirefoxHistoryUniqueHandler
+    history_all_handler: FirefoxHistoryAllHandler
     favicon_dir: Path
     temp_db_dir: Path
 
@@ -355,7 +402,8 @@ class Plugin(PluginInstance):
         self.temp_db_dir = Path(tempfile.mkdtemp(prefix=self.TEMP_DB_PREFIX))
         self.favicon_dir = Path(tempfile.mkdtemp(prefix=self.FAVICON_PREFIX))
         self.bookmark_handler = FirefoxBookmarkHandler(profile_path, self.temp_db_dir, self.favicon_dir)
-        self.history_handler = FirefoxHistoryHandler(profile_path, self.temp_db_dir, self.favicon_dir)
+        self.history_unique_handler = FirefoxHistoryUniqueHandler(profile_path, self.temp_db_dir, self.favicon_dir)
+        self.history_all_handler = FirefoxHistoryAllHandler(profile_path, self.temp_db_dir, self.favicon_dir)
 
     def __del__(self) -> None:
         shutil.rmtree(self.favicon_dir)
@@ -363,4 +411,4 @@ class Plugin(PluginInstance):
 
     @override
     def extensions(self) -> list[GeneratorQueryHandler]:
-        return [self.bookmark_handler, self.history_handler]
+        return [self.bookmark_handler, self.history_unique_handler, self.history_all_handler]
