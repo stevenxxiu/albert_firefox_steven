@@ -38,6 +38,7 @@ md_authors = ['@stevenxxiu']
 ICON_NAME = 'firefox-developer-edition'
 FIREFOX_DATA_PATH = Path.home() / '.config/mozilla/firefox/'
 PAGE_SIZE = 10
+KEEP_DB_SECS = 60
 
 
 class Place(NamedTuple):
@@ -72,7 +73,6 @@ def get_profile_path() -> Path:
     raise ValueError
 
 
-KEEP_DB_SECS = 10
 cleanup_timer: threading.Timer | None = None
 
 
