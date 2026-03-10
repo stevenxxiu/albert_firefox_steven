@@ -121,6 +121,8 @@ def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -
 
 
 def query_to_pattern(query: str) -> str:
+    if not query:
+        return '%'
     query = query.lower().replace('%', '%%')
     query = '%'.join(query.split())
     return f'%{query}%'
@@ -274,7 +276,7 @@ class FirefoxHistoryBaseHandler(FirefoxBaseHandler):  # pyright: ignore[reportIm
     @staticmethod
     def parse_query(query: str) -> HistoryQuery:
         matches = re.match(
-            r'(?:(?P<year>\d{1,4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?)?(?P<query_str>(\s+.*|))', query
+            r'^(?:(?P<year>\d{1,4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?)?\s*(?P<query_str>.*)?$', query
         )
         assert matches is not None
         matches_dict = matches.groupdict()
