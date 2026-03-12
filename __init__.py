@@ -233,10 +233,11 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
-        matcher = Matcher(ctx.query)
-        query_pattern = create_highlight_pattern(ctx.query)
+        query = ctx.query.strip()
+        matcher = Matcher(query)
+        query_pattern = create_highlight_pattern(query)
 
-        places = query_bookmarks(self.profile_path, self.temp_db_dir, ctx.query)
+        places = query_bookmarks(self.profile_path, self.temp_db_dir, query)
         url_hashes: set[int] = set()
         items_with_score: list[tuple[StandardItem, tuple[int, float]]] = []
         favicons: dict[int, bytes] = {}
@@ -300,7 +301,7 @@ class FirefoxHistoryBaseHandler(FirefoxBaseHandler):  # pyright: ignore[reportIm
 
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
-        query = self.parse_query(ctx.query)
+        query = self.parse_query(ctx.query.strip())
         query_pattern = create_highlight_pattern(query.query_str)
         url_hashes: set[int] = set()
         favicons: dict[int, bytes] = {}
