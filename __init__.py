@@ -278,6 +278,10 @@ class HistoryQuery(NamedTuple):
 
 
 class FirefoxHistoryBaseHandler(FirefoxBaseHandler):  # pyright: ignore[reportImplicitAbstractClass]
+    @override
+    def synopsis(self, _query: str) -> str:
+        return '[%Y[-%m[-%d]] <query>'
+
     @staticmethod
     def parse_query(query: str) -> HistoryQuery:
         matches = re.match(
@@ -377,10 +381,6 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
     @override
     def description(self) -> str:
         return 'Open all Firefox history'
-
-    @override
-    def synopsis(self, _query: str) -> str:
-        return '[%Y[-%m[-%d]] <query>'
 
     @override
     @staticmethod
