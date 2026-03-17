@@ -120,12 +120,11 @@ def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -
         return {row[0]: row[1] for row in cur}  # pyright: ignore[reportAny]
 
 
-def query_to_pattern(query: str) -> str:
+def query_to_patterns(query: str) -> list[str]:
     if not query:
-        return '%'
+        return []
     query = query.lower().replace('%', '%%')
-    query = '%'.join(query.split())
-    return f'%{query}%'
+    return [f'%{term}%' for term in query.split()]
 
 
 def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Generator[Place, None, None]:
@@ -140,17 +139,24 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
         if not ignored_folders:
             ignored_folders = [-1]
 
-        pattern = query_to_pattern(query)
+        patterns = query_to_patterns(query)
+        conds: list[str] = []
+        if ignored_folders:
+            conds.append(f'moz_bookmarks.parent NOT IN ({", ".join("?" for _ in range(len(ignored_folders)))})')
+        if patterns:
+            conds.append(f"""(
+                ({' AND '.join('LOWER(moz_bookmarks.title) LIKE (?)' for _ in range(len(patterns)))})
+                OR ({' AND '.join('LOWER(moz_places.url) LIKE (?)' for _ in range(len(patterns)))})
+            )
+            """)
         _ = cur.execute(
             f"""
             SELECT moz_places.url, moz_bookmarks.title, moz_places.url_hash
             FROM moz_bookmarks
             INNER JOIN moz_places ON moz_bookmarks.fk=moz_places.id
-            WHERE moz_bookmarks.fk IS NOT NULL
-                AND moz_bookmarks.parent NOT IN ({', '.join(['?'] * len(ignored_folders))})
-                AND (LOWER(moz_bookmarks.title) LIKE ? OR LOWER(moz_places.url) LIKE ?)
+            WHERE moz_bookmarks.fk IS NOT NULL{f' AND {" AND ".join(conds)}' if conds else ''}
             """,
-            [*ignored_folders, pattern, pattern],
+            [*ignored_folders, *patterns, *patterns],
         )
         for url, title, url_hash in cur:  # pyright: ignore[reportAny]
             yield Place(url, title or '', None, url_hash)
@@ -234,7 +240,7 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
     @override
     def items(self, ctx: QueryContext) -> Generator[list[Item], None, None]:
         query = ctx.query.strip()
-        matcher = Matcher(query)
+        matchers = [Matcher(term) for term in query.split()]
         query_pattern = create_highlight_pattern(query)
 
         places = query_bookmarks(self.profile_path, self.temp_db_dir, query)
@@ -243,19 +249,20 @@ class FirefoxBookmarkHandler(FirefoxBaseHandler):
         favicons: dict[int, bytes] = {}
         for url, name, _last_visit_date, url_hash in places:
             url_hashes.add(url_hash)
-            score: tuple[int, float] | None = None
-            if not score:
-                match = matcher.match(name)
-                if match:
-                    assert isinstance(match.score, float)
-                    score = (2, match.score)
-            if not score:
-                match = matcher.match(url)
-                if match:
-                    assert isinstance(match.score, float)
-                    score = (1, match.score)
-            if not score:
-                continue
+            if matchers:
+                score: tuple[int, float] | None = None
+                if not score:
+                    matches = [matcher.match(name) for matcher in matchers]
+                    if matches:
+                        score = (2, sum(match.score for match in matches))
+                if not score:
+                    matches = [matcher.match(url) for matcher in matchers]
+                    if matches:
+                        score = (1, sum(match.score for match in matches))
+                if not score:
+                    continue
+            else:
+                score = (0, 0.0)
             items_with_score.append((self.create_item(url, name, None, url_hash, query_pattern, favicons), score))
         items_with_score.sort(key=lambda item: item[1], reverse=True)
 
@@ -340,18 +347,26 @@ class FirefoxHistoryUniqueHandler(FirefoxHistoryBaseHandler):
     ) -> Generator[Place, None, None]:
         with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
             cur = conn.cursor()
-            pattern = query_to_pattern(query.query_str)
+            patterns = query_to_patterns(query.query_str)
+            conds: list[str] = []
+            if patterns:
+                conds.append(f"""(
+                    ({' AND '.join('LOWER(title) LIKE (?)' for _ in range(len(patterns)))})
+                    OR ({' AND '.join('LOWER(url) LIKE (?)' for _ in range(len(patterns)))})
+                )
+                """)
+            if query.max_us is not None:
+                conds.append(f'last_visit_date <= {query.max_us}')
             _ = cur.execute(
                 f"""
                 SELECT url, title, last_visit_date, url_hash
                 FROM moz_places
-                WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
-                {f' AND last_visit_date <= {query.max_us}' if query.max_us is not None else ''}
+                {f'WHERE {(" AND ".join(conds))}' if conds else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
                 """,
-                [pattern, pattern, limit, offset],
+                [*patterns, *patterns, limit, offset],
             )
             for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
                 yield Place(url, title or '', last_visit_date, url_hash)
@@ -381,19 +396,27 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
     ) -> Generator[Place, None, None]:
         with open_db(profile_path / 'places.sqlite', temp_db_dir) as conn:
             cur = conn.cursor()
-            pattern = query_to_pattern(query.query_str)
+            patterns = query_to_patterns(query.query_str)
+            conds: list[str] = []
+            if patterns:
+                conds.append(f"""(
+                    ({' AND '.join('LOWER(title) LIKE (?)' for _ in range(len(patterns)))})
+                    OR ({' AND '.join('LOWER(url) LIKE (?)' for _ in range(len(patterns)))})
+                )
+                """)
+            if query.max_us is not None:
+                conds.append(f'last_visit_date <= {query.max_us}')
             _ = cur.execute(
                 f"""
                 SELECT moz_places.url, moz_places.title, moz_historyvisits.visit_date, moz_places.url_hash
                 FROM moz_historyvisits
                 INNER JOIN moz_places ON moz_historyvisits.place_id=moz_places.id
-                WHERE (LOWER(title) LIKE ? OR LOWER(url) LIKE ?)
-                {f' AND last_visit_date <= {query.max_us}' if query.max_us is not None else ''}
+                {f'WHERE {(" AND ".join(conds))}' if conds else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
                 """,
-                [pattern, pattern, limit, offset],
+                [*patterns, *patterns, limit, offset],
             )
             for url, title, visit_date, url_hash in cur:  # pyright: ignore[reportAny]
                 yield Place(url, title or '', visit_date, url_hash)
