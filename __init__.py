@@ -73,7 +73,7 @@ def get_profile_path() -> Path:
     raise ValueError
 
 
-cleanup_timer: threading.Timer | None = None
+cleanup_timers: dict[Path, threading.Timer] = {}
 
 
 def rm_temp_db(temp_path: Path) -> None:
@@ -84,7 +84,7 @@ def rm_temp_db(temp_path: Path) -> None:
 
 @contextmanager
 def open_db(db_path: Path, temp_db_dir: Path) -> Iterator[sqlite3.Connection]:
-    global cleanup_timer
+    cleanup_timer = cleanup_timers.get(db_path)
     if cleanup_timer:
         cleanup_timer.cancel()
     temp_db_path = temp_db_dir / db_path.name
@@ -98,7 +98,8 @@ def open_db(db_path: Path, temp_db_dir: Path) -> Iterator[sqlite3.Connection]:
         with closing(sqlite3.connect(temp_db_path)) as conn:
             yield conn
     finally:
-        threading.Timer(KEEP_DB_SECS, rm_temp_db, args=(temp_db_path,)).start()
+        cleanup_timers[db_path] = threading.Timer(KEEP_DB_SECS, rm_temp_db, args=(temp_db_path,))
+        cleanup_timers[db_path].start()
 
 
 def get_favicons(profile_path: Path, temp_db_dir: Path, url_hashes: list[int]) -> dict[int, bytes]:
