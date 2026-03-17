@@ -143,20 +143,16 @@ def query_bookmarks(profile_path: Path, temp_db_dir: Path, query: str) -> Genera
         conds: list[str] = []
         if ignored_folders:
             conds.append(f'moz_bookmarks.parent NOT IN ({", ".join("?" for _ in range(len(ignored_folders)))})')
-        if patterns:
-            conds.append(f"""(
-                ({' AND '.join('LOWER(moz_bookmarks.title) LIKE (?)' for _ in range(len(patterns)))})
-                OR ({' AND '.join('LOWER(moz_places.url) LIKE (?)' for _ in range(len(patterns)))})
-            )
-            """)
+        for _ in range(len(patterns)):
+            conds.append('LOWER(moz_bookmarks.title) LIKE (?) OR LOWER(moz_places.url) LIKE (?)')
         _ = cur.execute(
             f"""
             SELECT moz_places.url, moz_bookmarks.title, moz_places.url_hash
             FROM moz_bookmarks
             INNER JOIN moz_places ON moz_bookmarks.fk=moz_places.id
-            WHERE moz_bookmarks.fk IS NOT NULL{f' AND {" AND ".join(conds)}' if conds else ''}
+            WHERE moz_bookmarks.fk IS NOT NULL{f' AND ({") AND (".join(conds)})' if conds else ''}
             """,
-            [*ignored_folders, *patterns, *patterns],
+            [*ignored_folders, *(pattern for pattern in patterns for _ in range(2))],
         )
         for url, title, url_hash in cur:  # pyright: ignore[reportAny]
             yield Place(url, title or '', None, url_hash)
@@ -349,24 +345,20 @@ class FirefoxHistoryUniqueHandler(FirefoxHistoryBaseHandler):
             cur = conn.cursor()
             patterns = query_to_patterns(query.query_str)
             conds: list[str] = []
-            if patterns:
-                conds.append(f"""(
-                    ({' AND '.join('LOWER(title) LIKE (?)' for _ in range(len(patterns)))})
-                    OR ({' AND '.join('LOWER(url) LIKE (?)' for _ in range(len(patterns)))})
-                )
-                """)
+            for _ in range(len(patterns)):
+                conds.append('LOWER(title) LIKE (?) OR LOWER(url) LIKE (?)')
             if query.max_us is not None:
                 conds.append(f'last_visit_date <= {query.max_us}')
             _ = cur.execute(
                 f"""
                 SELECT url, title, last_visit_date, url_hash
                 FROM moz_places
-                {f'WHERE {(" AND ".join(conds))}' if conds else ''}
+                {f'WHERE ({(") AND (".join(conds))})' if conds else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
                 """,
-                [*patterns, *patterns, limit, offset],
+                [*(pattern for pattern in patterns for _ in range(2)), limit, offset],
             )
             for url, title, last_visit_date, url_hash in cur:  # pyright: ignore[reportAny]
                 yield Place(url, title or '', last_visit_date, url_hash)
@@ -398,12 +390,8 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
             cur = conn.cursor()
             patterns = query_to_patterns(query.query_str)
             conds: list[str] = []
-            if patterns:
-                conds.append(f"""(
-                    ({' AND '.join('LOWER(title) LIKE (?)' for _ in range(len(patterns)))})
-                    OR ({' AND '.join('LOWER(url) LIKE (?)' for _ in range(len(patterns)))})
-                )
-                """)
+            for _ in range(len(patterns)):
+                conds.append('LOWER(title) LIKE (?) OR LOWER(url) LIKE (?)')
             if query.max_us is not None:
                 conds.append(f'last_visit_date <= {query.max_us}')
             _ = cur.execute(
@@ -411,12 +399,12 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
                 SELECT moz_places.url, moz_places.title, moz_historyvisits.visit_date, moz_places.url_hash
                 FROM moz_historyvisits
                 INNER JOIN moz_places ON moz_historyvisits.place_id=moz_places.id
-                {f'WHERE {(" AND ".join(conds))}' if conds else ''}
+                {f'WHERE ({(") AND (".join(conds))})' if conds else ''}
                 ORDER BY last_visit_date DESC
                 LIMIT ?
                 OFFSET ?
                 """,
-                [*patterns, *patterns, limit, offset],
+                [*(pattern for pattern in patterns for _ in range(2)), limit, offset],
             )
             for url, title, visit_date, url_hash in cur:  # pyright: ignore[reportAny]
                 yield Place(url, title or '', visit_date, url_hash)
