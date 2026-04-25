@@ -401,7 +401,7 @@ class FirefoxHistoryAllHandler(FirefoxHistoryBaseHandler):
                 FROM moz_historyvisits
                 INNER JOIN moz_places ON moz_historyvisits.place_id=moz_places.id
                 {f'WHERE ({(") AND (".join(conds))})' if conds else ''}
-                ORDER BY last_visit_date DESC
+                ORDER BY visit_date DESC
                 LIMIT ?
                 OFFSET ?
                 """,
