@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
@@ -83,7 +83,7 @@ def rm_temp_db(temp_path: Path) -> None:
 
 
 @contextmanager
-def open_db(db_path: Path, temp_db_dir: Path) -> Iterator[sqlite3.Connection]:
+def open_db(db_path: Path, temp_db_dir: Path) -> Generator[sqlite3.Connection]:
     cleanup_timer = cleanup_timers.get(db_path)
     if cleanup_timer:
         cleanup_timer.cancel()
